@@ -50,7 +50,8 @@ int validateParameters(char**);
 double calculateExtraSize(int partitions);
 double toSeconds(suseconds_t);
 long rebuildImage(ImageData, DataBucket*);
-long calculateWriteAmount(DataBucket, int, int, int);
+long calcRasterWriteAmount(int*, long, long);
+long calculateWriteAmount(ImageData, int, int, int);
 
 //--------------------------------------------------------------------------//
 // -- LIBRARY IMPLEMENTATION ---------------------------------------------- //
@@ -63,7 +64,7 @@ int readChunk(char* fileName, intmax_t *offset, intmax_t *limit,
     int value = 0, mult = 10;
     int newValue = FALSE;
     int increase = INCREASE_FACTOR;
-    long k = bucket->offset, bucketMemSize;
+    long k = bucket->offset, bucketBlockSize;
     char c;
 
     FILE *fp;
@@ -94,13 +95,14 @@ int readChunk(char* fileName, intmax_t *offset, intmax_t *limit,
             k++;
             // CHECKING IF WE ARE ABOUT TO FILL THE BUCKET
             *temp = bucket->data; 
-            bucketMemSize = bucket->msize;
-            bucket->msize = checkForRealloc((void**) temp, bucket->msize, 
-                k + REALLOC_MARGIN, sizeof(bucket->data[0]), increase);
+            bucketBlockSize = bucket->blckSize;
+            bucket->blckSize = checkForRealloc((void**) temp, 
+                bucket->blckSize, (k + REALLOC_MARGIN), 
+                sizeof(bucket->data[0]), increase);
             bucket->data = *temp;
-            if(bucketMemSize < bucket->msize) {
+            if(bucketBlockSize < bucket->blckSize) {
                 increase *= 2;
-            } else if(bucket->msize == -1) {
+            } else if(bucket->blckSize == -1) {
                 perror("Error: ");
                 return -1;
             }
@@ -118,27 +120,30 @@ int readChunk(char* fileName, intmax_t *offset, intmax_t *limit,
 // Duplication of the just readed source chunk 
 // to the destiny image struct chunk
 void* duplicateImageChunk(ImageData src, ImageData dst) {
+
     int** temp = NULL;
+    long blckInc = (src->blckSize - dst->blckSize);
+
     temp = (int**) malloc(sizeof(int*)); // Avoid breaking strcit aliasing
 
     *temp = dst->R;
-    dst->rsize = checkForRealloc((void**) temp, dst->rsize, src->rsize, 
-        sizeof(dst->R[0]), src->rsize - dst->rsize);
+    checkForRealloc((void**) temp, dst->blckSize, src->blckSize, 
+        sizeof(dst->R[0]), blckInc);
     dst->R = *temp;
 
     *temp = dst->G;
-    dst->gsize = checkForRealloc((void**) temp, dst->gsize, src->gsize, 
-        sizeof(dst->G[0]), src->gsize - dst->gsize);
+    checkForRealloc((void**) temp, dst->blckSize, src->blckSize, 
+        sizeof(dst->G[0]), blckInc);
     dst->G = *temp;
 
     *temp = dst->B;
-    dst->bsize = checkForRealloc((void**) temp, dst->bsize, src->bsize, 
-        sizeof(dst->B[0]), src->bsize - dst->bsize);
+    dst->blckSize = checkForRealloc((void**) temp, dst->blckSize, 
+        src->blckSize, sizeof(dst->B[0]), blckInc);
     dst->B = *temp;
 
     free(temp);
 
-    if(dst->rsize == -1 || dst->bsize == -1 || dst->gsize == -1) {
+    if(dst->blckSize == -1) {
         return NULL;
     }
     
@@ -239,12 +244,12 @@ void freeImagestructure(ImageData *src) {
 //--------------------------------------------------------------------------//
 int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
                float* kernel, int kernelSizeX, int kernelSizeY) {
-    int m, n;
+
     int *inPtr = NULL, *inPtr2 = NULL, *outPtr = NULL;
     float *kPtr = NULL;
     int kCenterX, kCenterY;
-    int rowMin, rowMax;                    // to check boundary of input array
-    int colMin, colMax;                    //
+    long rowMin, rowMax;                    // to check boundary of input array
+    long colMin, colMax;                    //
     float sum;                             // temp accumulation buffer
     
     // Parameter validatin
@@ -258,8 +263,8 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
     
     // init working  pointers
     // note that  it is shifted (kCenterX, kCenterY),
-    //inPtr = inPtr2 = &in[(dataSizeX * kCenterY) + kCenterX];
-    inPtr = inPtr2 = &in[(dataSizeX * dataOff) + kCenterX];
+    inPtr = inPtr2 = &in[(dataSizeX * kCenterY) + kCenterX];
+    //inPtr = inPtr2 = &in[(dataSizeX * dataOff) + kCenterX];
     outPtr = out;
     kPtr = kernel;
     
@@ -270,6 +275,8 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
         // should be between these
         rowMax = i + kCenterY;
         rowMin = i - dataSizeY + kCenterY;
+
+        //printf("rowMax - rowMin - { %d - %d }\n", rowMax, rowMin);
         
         // number of columns
         for(register int j = 0; j < dataSizeX; ++j) {
@@ -283,10 +290,10 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
             // flip the kernel and traverse all the kernel values
             // multiply each kernel value with underlying input data
             // kernel rows
-            for(m = 0; m < kernelSizeY; ++m) {
+            for(register int m = 0; m < kernelSizeY; ++m) {
                 // check if the index is out of bound of input array
                 if(m <= rowMax && m > rowMin) {
-                    for(n = 0; n < kernelSizeX; ++n) {
+                    for(register int n = 0; n < kernelSizeX; ++n) {
                         // check the boundary of array
                         if(n <= colMax && n > colMin) {
                             sum += *(inPtr - n) * (*kPtr);
@@ -352,11 +359,13 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
     long r, g, b, tsize;
     long rasterR, rasterG, rasterB;
     long increaseR, increaseG, increaseB;
+    long memR, memG, memB;
     int flip, **temp;
 
     r = g = b = 0L;
     flip = 0;
     increaseR = increaseG = increaseB = INCREASE_FACTOR;
+    memR = memG = memB = 0L;
     temp = (int**) malloc(sizeof(int*)); // Avoid breaking strict aliasing
 
     for(int i = 0; i < 1; i++) {
@@ -365,37 +374,38 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                 case 0:
                     img->R[r] = bucks[i]->data[j];
                     r++;
-                    rasterR = img->rsize;
+                    rasterR = img->blckSize;
                     *temp = img->R;
-                    img->rsize = checkForRealloc((void**) temp, img->rsize, 
+                    memR = checkForRealloc((void**) temp, img->blckSize, 
                         (r + REALLOC_MARGIN), sizeof(img->R[0]), increaseR);
                     img->R = *temp;
-                    if(rasterR < img->rsize) {
+                    if(rasterR < memR) {
                         increaseR *= 2;
                     }
                     break;
                 case 1:
                     img->G[g] = bucks[i]->data[j];
                     g++;
-                    rasterG = img->gsize;
+                    rasterG = img->blckSize;
                     *temp = img->G;
-                    img->gsize = checkForRealloc((void**) temp, img->gsize, 
+                    memG = checkForRealloc((void**) temp, img->blckSize, 
                         (g + REALLOC_MARGIN), sizeof(img->G[0]), increaseG);
                     img->G = *temp;
-                    if(rasterG < img->gsize) {
+                    if(rasterG < memG) {
                         increaseG *= 2;
                     }
                     break;
                 case 2:
                     img->B[b] = bucks[i]->data[j];
                     b++;
-                    rasterB = img->bsize;
+                    rasterB = img->blckSize;
                     *temp = img->B;
-                    img->bsize = checkForRealloc((void**) temp, img->bsize, 
+                    memB = checkForRealloc((void**) temp, img->blckSize, 
                         (b + REALLOC_MARGIN), sizeof(img->B[0]), increaseB);
                     img->B = *temp;
-                    if(rasterB < img->bsize) {
+                    if(rasterB < memB) {
                         increaseB *= 2;
+                        img->blckSize = memB;
                     }
                     break;
             }
@@ -426,30 +436,42 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
     return (tsize / 3);
 }
 
-long calculateWriteAmount(DataBucket bucket, int offset, int chunksize, 
+long calcRasterWriteAmount(int *raster, long offset, long end) {
+
+    long wAmount = 0L;
+    int value = 0;
+
+    while(offset < end) {
+        value = abs(raster[offset]);
+        if(value != raster[offset]) { // Negative sign = 1 byte
+            wAmount += 1;
+        }
+        if(value > 99) { // Three digit number = 3 bytes
+            wAmount += 3;
+        } else if(value > 9) { // Two digit number = 2 bytes
+            wAmount += 2;
+        } else { // One digit number = 1 byte
+            wAmount += 1;
+        }
+
+        wAmount += 1; // Seperator character = 1 byte
+        offset++;
+    }
+
+    return wAmount;
+}
+
+long calculateWriteAmount(ImageData img, int offset, int chunksize, 
     int imgWidth) {
 
-    int data = 0;
-    long i = offset * 3 * imgWidth, 
-         end = (chunksize * imgWidth * 3) + i;
+    long i = offset * imgWidth, 
+         end = (chunksize * imgWidth) + i;
 
     long writeAmount = 0L;
 
-    while(i < end) {
-        data = abs(bucket->data[i]);
-        if(data != bucket->data[i]) { // negative sign = 1 byte
-            writeAmount += 1;
-        }
-        if(data > 99) { // 3 digit value = 3 bytes
-            writeAmount += 3;
-        } else if(data > 9) { // 2 digit value = 2 bytes
-            writeAmount += 2;
-        } else { // 1 digit value = 1 byte
-            writeAmount += 1;
-        }
-        writeAmount += 1; // Separation character = 1 byte
-        i++;
-    }
+    writeAmount += calcRasterWriteAmount(img->R, i, end);
+    writeAmount += calcRasterWriteAmount(img->G, i, end);
+    writeAmount += calcRasterWriteAmount(img->B, i ,end);
 
     return writeAmount;
 }
@@ -628,27 +650,15 @@ int main(int argc, char **argv) {
         gettimeofday(&tim, NULL);
         start = tim.tv_sec + toSeconds(tim.tv_usec);
 
-        if (readChunk(sourceFile, &(chunkLst[pc]->start), &(chunkLst[pc]->end), 
-            buckets[0])) {
+        if (readChunk(sourceFile, &(chunkLst[pc]->start), 
+            &(chunkLst[pc]->end), buckets[0])) {
              return -1;
         }
-
-        //printf("[P%d] - DATA READ - %ld\n", prank,buckets[0]->bsize - buckets[0]->offset);
-
-        /*printf("[BEFORE ALIGN - P%d(%d)] SIZE - %ld\n", prank, 
-            pnum, buckets[0]->bsize);*/
-
-        MPI_Barrier(MPI_COMM_WORLD);
 
         if(pnum > 1) {
             transferUnalignedRasters(prank, pnum, buckets[0], 
                 partitions, c, imgWidth);
         }
-
-        printf("[AFTER ALIGN - P%d(%d)] SIZE - %ld\n", prank, 
-            pnum, buckets[0]->bsize);
-
-        MPI_Barrier(MPI_COMM_WORLD);
 
         haloSize = (halo / 2);
 
@@ -656,9 +666,6 @@ int main(int argc, char **argv) {
             transferBorders(pc, partitions, prank, pnum, buckets[0], 
                 imgWidth, haloSize);
         }
-
-        /*printf("[AFTER BTRANS - P%d(%d)] SIZE - %ld\n", prank, 
-            pnum, buckets[0]->bsize);*/
 
         // Copying data from the DataBucket into the ImageData arrays
         iterSize = rebuildImage(source, buckets);
@@ -673,11 +680,20 @@ int main(int argc, char **argv) {
         // Rows to convolve needs to be bigger than kernel size, either way
         // there'll be problems in pixel alignment.
 
-        offset = haloSize;
-        chunkSize = (convSize / imgWidth) - 2 * haloSize;
+        if(pc < (effectivePart-1)) {
+            chunkSize = (convSize / imgWidth) - haloSize;
+            if(pc == 0) {
+                offset = 0;
+            } else {
+                offset = haloSize;
+            }
+        } else {
+            chunkSize = (convSize / imgWidth);
+            offset = haloSize;
+        }
 
-        //printf("[P%d] ITERSIZE: %ld\n", prank, iterSize / imgWidth);
-        printf("[P%d] CONVSIZE: %ld - %ld\n", prank, chunkSize, offset);
+        /*printf("[P%d] ITERSIZE: %ld\n", prank, iterSize / imgWidth);
+        printf("[P%d] CONVSIZE: %ld - %ld\n", prank, chunkSize, offset);*/
         
         // Duplicate the image chunk
         gettimeofday(&tim, NULL);
@@ -695,12 +711,12 @@ int main(int argc, char **argv) {
         gettimeofday(&tim, NULL);
         start = tim.tv_sec + toSeconds(tim.tv_usec);
 
-        /*convolve2D(source->R, output->R, imgWidth, chunkSize, 
+        convolve2D(source->R, output->R, imgWidth, chunkSize, 
         	offset, kern->vkern, kern->kernelX, kern->kernelY);
         convolve2D(source->G, output->G, imgWidth, chunkSize, 
         	offset, kern->vkern, kern->kernelX, kern->kernelY);
         convolve2D(source->B, output->B, imgWidth, chunkSize, 
-        	offset, kern->vkern, kern->kernelX, kern->kernelY);*/
+        	offset, kern->vkern, kern->kernelX, kern->kernelY);
         
         gettimeofday(&tim, NULL);
         tconv = tconv + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
@@ -723,7 +739,7 @@ int main(int argc, char **argv) {
 
         printf("[P%d] WCONVSIZE: %ld - %ld\n",prank, chunkSize, offset);
 
-        writeSize = calculateWriteAmount(buckets[0], offset, chunkSize, 
+        writeSize = calculateWriteAmount(output, offset, chunkSize, 
             imgWidth);
 
         MPI_Allgather(&writeSize, 1, MPI_LONG, writeOffs, 1, MPI_LONG,
@@ -750,15 +766,14 @@ int main(int argc, char **argv) {
 
         // Moving previously discarded pixels to the beginning of the bucket
         // for the next iteration
-
-        MPI_Barrier(MPI_COMM_WORLD);
-
-        if((partitions > 1) && (pnum > 1) && c < partitions-1) {
-            adjustBucketContents(buckets, 1, prank, pnum, imgWidth, haloSize);
+        if(c < partitions-1) {
+            if(pnum > 1) {
+                adjustBucketContents(buckets, 1, prank, pnum, imgWidth, 
+                    haloSize);
+            } else {
+                adjustProcessBucket(buckets, imgWidth, haloSize);
+            }
         }
-
-        /*printf("[AFTER ADJUST - P%d(%d)] SIZE - %ld\n", prank, 
-            pnum, buckets[0]->bsize);*/
 
         c++;
     }

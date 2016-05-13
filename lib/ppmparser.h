@@ -35,6 +35,8 @@ struct imageppm {
     int maxcolor;
     int P;
 
+    long blckSize;
+
     long rsize;
     long bsize;
     long gsize;
@@ -70,7 +72,8 @@ typedef struct imgchunk* ImageChunk;
 struct databucket {
 
     long bsize;
-    long msize;
+    long blckSize;
+
     int offset;
     int *data;
 };
@@ -92,6 +95,7 @@ void freeDataBuckets(DataBucket*, int);
 void transferUnalignedRasters(int, int, DataBucket, int, int, int);
 void transferBorders(int, int, int, int, DataBucket, int, int);
 void adjustBucketContents(DataBucket*, int, int, int, int, int);
+void adjustProcessBucket(DataBucket*, int, int);
 intmax_t getAdjustedPoint(FILE** f, intmax_t next);
 ImageData parseFileHeader(char*, FILE**, int, int, double);
 ImageData duplicateImageData(ImageData, int, int, double);

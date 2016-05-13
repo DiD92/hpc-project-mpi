@@ -39,15 +39,15 @@ void exchangeSections(int*, int*, DataBucket, int, int, int);
 // -- LIBRARY IMPLEMENTATION ---------------------------------------------- //
 //--------------------------------------------------------------------------//
 
-long checkForRealloc(void **ptr, long currSize, long margin, size_t posSize,
-    long reallocIncrement) {
+long checkForRealloc(void **ptr, long allcBlcks, long actBlcks, size_t bSize,
+    long incBlck) {
 
-    long newSize = currSize;
+    long newAlloc = allcBlcks;
     void *temp = NULL;
 
-    if(newSize < margin) {
-        newSize = newSize + reallocIncrement;
-        if((temp = realloc(*ptr, newSize * posSize)) == NULL) {
+    if(allcBlcks < actBlcks) {
+        newAlloc = newAlloc + incBlck;
+        if((temp = realloc(*ptr, newAlloc * bSize)) == NULL) {
             free(*ptr);
             return -1;
         } else {
@@ -55,7 +55,7 @@ long checkForRealloc(void **ptr, long currSize, long margin, size_t posSize,
         }
     }
 
-    return newSize;
+    return newAlloc;
 }
 
 int calcOffset(long size, int iwidth) {
@@ -133,7 +133,7 @@ DataBucket* initializeBuckets(int nbuckets, long bsize) {
     for(int i = 0; i < nbuckets; i++) {
         buckets[i] = malloc(sizeof(struct databucket));
         buckets[i]->bsize = 0;
-        buckets[i]->msize = (sizeof(int) * bsize);
+        buckets[i]->blckSize = bsize;
         buckets[i]->offset = 0;
         buckets[i]->data = calloc(sizeof(int), bsize);
     }
@@ -183,9 +183,9 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
         MPI_Get_count(&status, MPI_INT, &dataRecvd);
         //printf("[P%d] RECV - %d\n", prank, dataRecvd);
         bsize += transData;
-        if((bsize * sizeof(int)) > bucket->msize) {
+        if(bsize > bucket->blckSize) {
             printf("[P%d] REALLOC NECESSARY 1 %ld - %ld\n",prank, 
-                bsize * sizeof(int), bucket->msize);
+                bsize, bucket->blckSize);
             temp = realloc((void*) bucket->data, bsize * sizeof(int));
             if(temp != NULL) {
                 bucket->data = temp;
@@ -194,7 +194,7 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
                 perror("Error realloc");
                 exit(-1);
             }
-            bucket->msize = bsize * sizeof(int);
+            bucket->blckSize = bsize;
         }
         memmove(&bucket->data[transData], &bucket->data[0], bucket->bsize * 
             sizeof(int));
@@ -308,8 +308,8 @@ void exchangeSections(int *lbuff, int *rbuff, DataBucket bucket,
         MPI_COMM_WORLD, &status);
 
     *temp = data;
-    bucket->msize = checkForRealloc(temp, bucket->msize, 
-        (dataSize + transData) * sizeof(int), sizeof(int), transData);
+    bucket->blckSize = checkForRealloc(temp, bucket->blckSize, 
+        (dataSize + transData), sizeof(int), transData);
     data = *temp;
 
     if(putUp == TRUE) {
@@ -366,6 +366,30 @@ void adjustBucketContents(DataBucket *buckets, int nbuckets,
 
 }
 
+void adjustProcessBucket(DataBucket *buckets, int iwidth, int halosize) {
+
+    long bsize = 0L;
+    int offsetData = 0;
+
+    int rasterOff = 0, rowOff = 0;
+
+    bsize = buckets[0]->bsize;
+    rasterOff = (int) (bsize % 3);
+    rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
+
+    offsetData = rasterOff + rowOff + (halosize * 6 * iwidth);
+
+    printf("DATA TO MOVE: %d\n", offsetData);
+
+    memmove(&buckets[0]->data[0], &buckets[0]->data[bsize-offsetData], 
+        offsetData * sizeof(int));
+
+    buckets[0]->offset = offsetData;
+    buckets[0]->bsize = offsetData;
+}
+
+
+
 intmax_t getAdjustedPoint(FILE** f, intmax_t next) {
     fseek(*f, next, SEEK_SET);
     char c;
@@ -417,6 +441,8 @@ ImageData parseFileHeader(char* nombre, FILE **fp, int partitions, int halo,
 
         img->rsize = img->gsize = img->bsize = chunk;
 
+        img->blckSize = chunk;
+
         img->R = calloc(img->rsize, sizeof(int));
         img->G = calloc(img->gsize, sizeof(int));
         img->B = calloc(img->bsize, sizeof(int));
@@ -454,6 +480,8 @@ ImageData duplicateImageData(ImageData src, int partitions, int halo,
     dst->rsize = src->rsize;
     dst->gsize = src->gsize;
     dst->bsize = src->bsize;
+
+    dst->blckSize = src->blckSize;
 
     dst->R = calloc(chunk, sizeof(int));
     dst->G = calloc(chunk, sizeof(int));
