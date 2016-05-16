@@ -58,33 +58,30 @@ long calculateWriteAmount(ImageData, int, int, int);
 //--------------------------------------------------------------------------//
 
 // Read the corresponding chunk from the source Image
-int readChunk(char* fileName, intmax_t *offset, intmax_t *limit, 
+int readChunk(MPI_File* mfp, intmax_t *offset, intmax_t *limit, 
     DataBucket bucket) {
+
     intmax_t pos = *offset;
     int value = 0, mult = 10;
+    int count = 0;
     int newValue = FALSE;
     int increase = INCREASE_FACTOR;
     long k = bucket->offset, bucketBlockSize;
     char c;
 
-    FILE *fp;
+    MPI_Status status;
+
     int **temp = NULL;
 
     temp = (int**) malloc(sizeof(int*)); // Avoid breaking strict aliasing
 
-    if((fp = openFile(fileName, "r")) == NULL) {
-        perror("Error: ");
-        return -1;
-    }
+    MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, 
+            "native", MPI_INFO_NULL);
 
-    if(fseek(fp, pos, SEEK_SET)) {
-        perror("Error: ");
-        return -1;
-    }
-
-    while(pos < *limit) {
-        pos = ftell(fp);
-        c = fgetc(fp);
+    while(pos <= *limit) { 
+        MPI_File_read(*mfp, &c, 1, MPI_CHAR, &status);
+        //printf("%ld - %c\n", count, c);
+        //c = fgetc(fp);
         if(isdigit(c)) {
             value = (value * mult) + (c - '0');
             newValue = TRUE;
@@ -107,11 +104,13 @@ int readChunk(char* fileName, intmax_t *offset, intmax_t *limit,
                 return -1;
             }
         }
+        MPI_Get_count(&status, MPI_CHAR, &count);
+        pos += count;
     }
 
     bucket->bsize = k;
 
-    fclose(fp);
+    //fclose(fp);
     free(temp);
 
     return 0;
@@ -207,16 +206,30 @@ int initfilestore(ImageData img, FILE** fp, char* fileName, long *position) {
 }
 
 // Writing the image chunk to the resulting file.
-int savingChunk(ImageData img, FILE **fp, long *offset, long dataOffst, 
+int savingChunk(ImageData img, MPI_File *mfp, long *offset, long dataOffst, 
     long count){
+
     long end = count + dataOffst;
+    MPI_Status status;
+
+    char num[10];
+
+    MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, 
+            "native", MPI_INFO_NULL);
+
     // Writing image partition
-    fseek(*fp, *offset, SEEK_SET);
-    
     for(long i = dataOffst; i < end; i++) {
-        fprintf(*fp, "%d %d %d\n", img->R[i], img->G[i], img->B[i]);
+        /*fprintf(*fp, "%d %d %d\n", img->R[i], img->G[i], img->B[i]);*/
+        sprintf(num, "%d", img->R[i]);
+        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
+        MPI_File_write(*mfp, " ", 1, MPI_CHAR, &status);
+        sprintf(num, "%d", img->G[i]);
+        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
+        MPI_File_write(*mfp, " ", 1, MPI_CHAR, &status);
+        sprintf(num, "%d", img->B[i]);
+        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
+        MPI_File_write(*mfp, "\n", 1, MPI_CHAR, &status);
     }
-    *offset = ftell(*fp);
     return 0;
 }
 
@@ -502,6 +515,8 @@ int main(int argc, char **argv) {
 
     FILE *fpsrc, *fpdst;
 
+    MPI_File *mfpsrc, *mfpdst;
+
     ImageData source, output;
 
     KernelData kern;
@@ -515,6 +530,7 @@ int main(int argc, char **argv) {
     tstart = tend = tread = tcopy = tconv = tstore = treadk = 0.0;
     sourceFile = outFile = kernFile = NULL;
     fpsrc = fpdst = NULL;
+    mfpsrc = mfpdst = NULL;
     source = output = NULL;
     kern = NULL;
 
@@ -552,6 +568,14 @@ int main(int argc, char **argv) {
     writeOffs = (long*) malloc(sizeof(long) * pnum);
 
     getcwd(cwd, sizeof(cwd));
+
+    // Opening files
+
+    mfpsrc = (MPI_File*) malloc(sizeof(MPI_File));
+    mfpdst = (MPI_File*) malloc(sizeof(MPI_File));
+
+    openMPIFile(mfpsrc, sourceFile, MPI_MODE_RDONLY);
+    openMPIFile(mfpdst, outFile, MPI_MODE_WRONLY | MPI_MODE_CREATE);
     
     // READING IMAGE HEADERS, KERNEL Matrix, DUPLICATE IMAGE DATA, 
     // OPEN RESULTING IMAGE FILE
@@ -650,14 +674,15 @@ int main(int argc, char **argv) {
         gettimeofday(&tim, NULL);
         start = tim.tv_sec + toSeconds(tim.tv_usec);
 
-        if (readChunk(sourceFile, &(chunkLst[pc]->start), 
+        if (readChunk(mfpsrc, &(chunkLst[pc]->start), 
             &(chunkLst[pc]->end), buckets[0])) {
              return -1;
         }
 
+        printf("[P%d] - DATA READ - %ld\n", prank,buckets[0]->bsize - buckets[0]->offset);
+
         if(pnum > 1) {
-            transferUnalignedRasters(prank, pnum, buckets[0], 
-                partitions, c, imgWidth);
+            transferUnalignedRasters(prank, pnum, buckets[0], imgWidth);
         }
 
         haloSize = (halo / 2);
@@ -755,7 +780,7 @@ int main(int argc, char **argv) {
         }
 
         start = tim.tv_sec + toSeconds(tim.tv_usec);
-        if (savingChunk(output, &fpdst, &position, (offset * imgWidth), 
+        if (savingChunk(output, mfpdst, &position, (offset * imgWidth), 
                         (chunkSize * imgWidth))) {
             perror("Error: ");
             return -1;
@@ -768,7 +793,7 @@ int main(int argc, char **argv) {
         // for the next iteration
         if(c < partitions-1) {
             if(pnum > 1) {
-                adjustBucketContents(buckets, 1, prank, pnum, imgWidth, 
+                adjustBucketContents(buckets, prank, pnum, imgWidth, 
                     haloSize);
             } else {
                 adjustProcessBucket(buckets, imgWidth, haloSize);
@@ -780,6 +805,9 @@ int main(int argc, char **argv) {
 
     fclose(fpsrc);
     fclose(fpdst);
+
+    MPI_File_close(mfpsrc);
+    MPI_File_close(mfpdst);
     
     gettimeofday(&tim, NULL);
     tend = tim.tv_sec + toSeconds(tim.tv_usec);

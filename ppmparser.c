@@ -71,6 +71,10 @@ FILE* openFile(char* filename, char* mode) {
     return fopen(filename, mode);
 }
 
+int openMPIFile(MPI_File* mf, char* filename, int mode) {
+    return MPI_File_open(MPI_COMM_WORLD, filename, mode, MPI_INFO_NULL, mf);
+}
+
 off_t fsize(const char *filename) {
     struct stat st; 
 
@@ -150,8 +154,8 @@ void freeDataBuckets(DataBucket* buckets, int nbuckets) {
     free(buckets);
 }
 
-void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
-    int partitions, int cpart, int iwidth) {
+void transferUnalignedRasters(int prank, int pnum, DataBucket bucket, 
+    int iwidth) {
 
     int transData = 0L;
     long bsize = bucket->bsize;
@@ -209,7 +213,7 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
                 buff = temp;
             } else {
                 free(buff);
-                perror("Erro realloc");
+                perror("Error realloc");
                 exit(-1);
             }
             memcpy(&buff[0], &bucket->data[bsize-transData], 
@@ -325,8 +329,8 @@ void exchangeSections(int *lbuff, int *rbuff, DataBucket bucket,
     free(temp);
 }
 
-void adjustBucketContents(DataBucket *buckets, int nbuckets, 
-    int prank, int pnum, int iwidth, int halosize) {
+void adjustBucketContents(DataBucket *buckets, int prank, int pnum, 
+    int iwidth, int halosize) {
 
     long bsize = 0L;
     int dataRecvd = 0;

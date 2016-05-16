@@ -1,6 +1,6 @@
 TODO at 12/05/2016
 
--Adapt file descriptors to MPI
+-Finish adapting file descriptors to MPI
 
 -Try to fix convolution algorithm
 
