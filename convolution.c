@@ -63,11 +63,12 @@ int readChunk(MPI_File* mfp, intmax_t *offset, intmax_t *limit,
 
     intmax_t pos = *offset;
     int value = 0, mult = 10;
-    int count = 0;
     int newValue = FALSE;
     int increase = INCREASE_FACTOR;
-    long k = bucket->offset, bucketBlockSize;
+    long k = bucket->offset, bucketBlockSize, i = 0;
     char c;
+
+    char *cbuff = NULL;
 
     MPI_Status status;
 
@@ -75,13 +76,15 @@ int readChunk(MPI_File* mfp, intmax_t *offset, intmax_t *limit,
 
     temp = (int**) malloc(sizeof(int*)); // Avoid breaking strict aliasing
 
+    cbuff = (char*) malloc(sizeof(char) * (*limit - *offset + 1));
+
     MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, 
             "native", MPI_INFO_NULL);
 
+    MPI_File_read(*mfp, &cbuff[0], (*limit - *offset + 1), MPI_CHAR, &status);
+
     while(pos <= *limit) { 
-        MPI_File_read(*mfp, &c, 1, MPI_CHAR, &status);
-        //printf("%ld - %c\n", count, c);
-        //c = fgetc(fp);
+        c = cbuff[i];
         if(isdigit(c)) {
             value = (value * mult) + (c - '0');
             newValue = TRUE;
@@ -103,15 +106,15 @@ int readChunk(MPI_File* mfp, intmax_t *offset, intmax_t *limit,
                 perror("Error: ");
                 return -1;
             }
-        }
-        MPI_Get_count(&status, MPI_CHAR, &count);
-        pos += count;
+        }     
+        pos += 1;
+        i += 1;
     }
 
     bucket->bsize = k;
 
-    //fclose(fp);
     free(temp);
+    free(cbuff);
 
     return 0;
 }
@@ -207,29 +210,29 @@ int initfilestore(ImageData img, FILE** fp, char* fileName, long *position) {
 
 // Writing the image chunk to the resulting file.
 int savingChunk(ImageData img, MPI_File *mfp, long *offset, long dataOffst, 
-    long count){
+    long count, long writeAmount){
 
     long end = count + dataOffst;
     MPI_Status status;
 
-    char num[10];
+    char *obuff = NULL;
+
+    obuff = malloc(sizeof(char) * (writeAmount + 1));
+
+    for(long i = dataOffst, k = 0; i < end; i++) {
+        k += sprintf(&obuff[k], "%d ", img->R[i]);
+        k += sprintf(&obuff[k], "%d ", img->G[i]);
+        k += sprintf(&obuff[k], "%d\n", img->B[i]);
+    }
 
     MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, 
             "native", MPI_INFO_NULL);
 
     // Writing image partition
-    for(long i = dataOffst; i < end; i++) {
-        /*fprintf(*fp, "%d %d %d\n", img->R[i], img->G[i], img->B[i]);*/
-        sprintf(num, "%d", img->R[i]);
-        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
-        MPI_File_write(*mfp, " ", 1, MPI_CHAR, &status);
-        sprintf(num, "%d", img->G[i]);
-        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
-        MPI_File_write(*mfp, " ", 1, MPI_CHAR, &status);
-        sprintf(num, "%d", img->B[i]);
-        MPI_File_write(*mfp, &num[0], strlen(num), MPI_CHAR, &status);
-        MPI_File_write(*mfp, "\n", 1, MPI_CHAR, &status);
-    }
+    MPI_File_write(*mfp, (void*) &obuff[0], writeAmount, MPI_CHAR, &status);
+
+    free(obuff);
+
     return 0;
 }
 
@@ -261,9 +264,9 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
     int *inPtr = NULL, *inPtr2 = NULL, *outPtr = NULL;
     float *kPtr = NULL;
     int kCenterX, kCenterY;
-    long rowMin, rowMax;                    // to check boundary of input array
-    long colMin, colMax;                    //
-    float sum;                             // temp accumulation buffer
+    long rowMin, rowMax;                 // to check boundary of input array
+    long colMin, colMax;                //
+    float sum;                         // temp accumulation buffer
     
     // Parameter validatin
     if(!in || !out || !kernel || dataSizeX <= 0 || kernelSizeX <= 0) { 
@@ -277,7 +280,6 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
     // init working  pointers
     // note that  it is shifted (kCenterX, kCenterY),
     inPtr = inPtr2 = &in[(dataSizeX * kCenterY) + kCenterX];
-    //inPtr = inPtr2 = &in[(dataSizeX * dataOff) + kCenterX];
     outPtr = out;
     kPtr = kernel;
     
@@ -288,8 +290,6 @@ int convolve2D(int* in, int* out, int dataSizeX, int dataSizeY, int dataOff,
         // should be between these
         rowMax = i + kCenterY;
         rowMin = i - dataSizeY + kCenterY;
-
-        //printf("rowMax - rowMin - { %d - %d }\n", rowMax, rowMin);
         
         // number of columns
         for(register int j = 0; j < dataSizeX; ++j) {
@@ -390,7 +390,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterR = img->blckSize;
                     *temp = img->R;
                     memR = checkForRealloc((void**) temp, img->blckSize, 
-                        (r + REALLOC_MARGIN), sizeof(img->R[0]), increaseR);
+                        (r + REALLOC_MARGIN), sizeof(int), increaseR);
                     img->R = *temp;
                     if(rasterR < memR) {
                         increaseR *= 2;
@@ -402,7 +402,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterG = img->blckSize;
                     *temp = img->G;
                     memG = checkForRealloc((void**) temp, img->blckSize, 
-                        (g + REALLOC_MARGIN), sizeof(img->G[0]), increaseG);
+                        (g + REALLOC_MARGIN), sizeof(int), increaseG);
                     img->G = *temp;
                     if(rasterG < memG) {
                         increaseG *= 2;
@@ -414,7 +414,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterB = img->blckSize;
                     *temp = img->B;
                     memB = checkForRealloc((void**) temp, img->blckSize, 
-                        (b + REALLOC_MARGIN), sizeof(img->B[0]), increaseB);
+                        (b + REALLOC_MARGIN), sizeof(int), increaseB);
                     img->B = *temp;
                     if(rasterB < memB) {
                         increaseB *= 2;
@@ -452,21 +452,11 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
 long calcRasterWriteAmount(int *raster, long offset, long end) {
 
     long wAmount = 0L;
-    int value = 0;
+
+    char value[10];
 
     while(offset < end) {
-        value = abs(raster[offset]);
-        if(value != raster[offset]) { // Negative sign = 1 byte
-            wAmount += 1;
-        }
-        if(value > 99) { // Three digit number = 3 bytes
-            wAmount += 3;
-        } else if(value > 9) { // Two digit number = 2 bytes
-            wAmount += 2;
-        } else { // One digit number = 1 byte
-            wAmount += 1;
-        }
-
+        wAmount += sprintf(&value[0], "%d", raster[offset]);
         wAmount += 1; // Seperator character = 1 byte
         offset++;
     }
@@ -507,8 +497,6 @@ int main(int argc, char **argv) {
     
     double start, tstart, tend, tread, tcopy, tconv, tstore, treadk;
     float extraSizeFactor;
-
-    struct timeval tim;
 
     char *sourceFile, *outFile, *kernFile;
     char cwd[1024];
@@ -554,6 +542,9 @@ int main(int argc, char **argv) {
 
     MPI_Init(&argc, &argv);
 
+    start = MPI_Wtime();
+    tstart = start;
+
     MPI_Comm_size(MPI_COMM_WORLD, &pnum);
     MPI_Comm_rank(MPI_COMM_WORLD, &prank);
 
@@ -570,7 +561,6 @@ int main(int argc, char **argv) {
     getcwd(cwd, sizeof(cwd));
 
     // Opening files
-
     mfpsrc = (MPI_File*) malloc(sizeof(MPI_File));
     mfpdst = (MPI_File*) malloc(sizeof(MPI_File));
 
@@ -581,12 +571,11 @@ int main(int argc, char **argv) {
     // OPEN RESULTING IMAGE FILE
 
     // Reading kernel matrix
-    gettimeofday(&tim, NULL);
-    start = tim.tv_sec + toSeconds(tim.tv_usec);
-    tstart = start;
+    start = MPI_Wtime();
     if ((kern = readKernel(kernFile)) == NULL) {
         return -1;
     }
+
     // The matrix kernel defines the halo size to use with the image. 
     // The halo is zero when the image is not partitioned.
     if (effectivePart == 1) {
@@ -595,17 +584,14 @@ int main(int argc, char **argv) {
         halo = kern->kernelY;
     }
 
-    gettimeofday(&tim, NULL);
-    treadk = treadk + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+    treadk = MPI_Wtime() - start;
 
     // Reading Image Header. Image properties: Magical number, comment, 
     // size and color resolution.
-    gettimeofday(&tim, NULL);
-    start = tim.tv_sec + toSeconds(tim.tv_usec);
+    start = MPI_Wtime();
 
     // Calculating extra size for memory assignment in order to avoid
     // calling realloc further in the execution
-
     extraSizeFactor = extraSizeFactor + calculateExtraSize(effectivePart);
 
     // Memory allocation based on number of partitions and halo size.
@@ -620,35 +606,28 @@ int main(int argc, char **argv) {
     bposition = source->headersize;
     totalWritten = bposition;
 
-    gettimeofday(&tim, NULL);
-    tread = tread + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+    tread = tread + (MPI_Wtime() - start);
     
     // Duplicate the image struct.
-    gettimeofday(&tim, NULL);
-    start = tim.tv_sec + toSeconds(tim.tv_usec);
+    start = MPI_Wtime();
     if ((output = duplicateImageData(source, effectivePart, halo, 
         extraSizeFactor)) == NULL) {
         return -1;
     }
-    gettimeofday(&tim, NULL);
-    tcopy = tcopy + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+    tcopy = tcopy + (MPI_Wtime() - start);
     
     // Initialize Image output file. Open the file and store the image header
-    if(prank == 0) {
-        gettimeofday(&tim, NULL);
-        start = tim.tv_sec + toSeconds(tim.tv_usec);
+    start = MPI_Wtime();
+    if(prank == 0) { 
         if (initfilestore(output, &fpdst, outFile, &position) != 0) {
             perror("Error: ");
             return -1;
         }
-        gettimeofday(&tim, NULL);
-        tstore = tstore + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
-    } else {
-        fpdst = openFile(outFile, "w");
-        if(fpdst == NULL) {
-            perror("File open error");
-        }
+        fclose(fpdst);
+        
     }
+
+    tstore = tstore + (MPI_Wtime() - start);
 
     bucketSize = (imgWidth * imgHeight * 3) / effectivePart;
     bucketSize = bucketSize + (imgWidth * halo);
@@ -656,6 +635,8 @@ int main(int argc, char **argv) {
     bucketSize = (long) ((float) bucketSize * extraSizeFactor);
 
     chunkLst = calculateChunkSections(&fpsrc, source, effectivePart);
+
+    fclose(fpsrc);
 
     if ((buckets = initializeBuckets(1, bucketSize)) == NULL) {
         perror("Error: ");
@@ -668,18 +649,17 @@ int main(int argc, char **argv) {
 
     while (c < partitions) {
 
-        pc = pnum * c + prank;
+        pc = (pnum * c) + prank;
 
         // Reading chunk.
-        gettimeofday(&tim, NULL);
-        start = tim.tv_sec + toSeconds(tim.tv_usec);
+        start = MPI_Wtime();
 
         if (readChunk(mfpsrc, &(chunkLst[pc]->start), 
             &(chunkLst[pc]->end), buckets[0])) {
              return -1;
         }
 
-        printf("[P%d] - DATA READ - %ld\n", prank,buckets[0]->bsize - buckets[0]->offset);
+        tread = tread + (MPI_Wtime() - start);
 
         if(pnum > 1) {
             transferUnalignedRasters(prank, pnum, buckets[0], imgWidth);
@@ -692,11 +672,10 @@ int main(int argc, char **argv) {
                 imgWidth, haloSize);
         }
 
+
         // Copying data from the DataBucket into the ImageData arrays
         iterSize = rebuildImage(source, buckets);
 
-        gettimeofday(&tim, NULL);
-        tread = tread + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
 
         // Discarding incomplete row.
         convOffset = (iterSize % imgWidth);
@@ -704,7 +683,6 @@ int main(int argc, char **argv) {
 
         // Rows to convolve needs to be bigger than kernel size, either way
         // there'll be problems in pixel alignment.
-
         if(pc < (effectivePart-1)) {
             chunkSize = (convSize / imgWidth) - haloSize;
             if(pc == 0) {
@@ -716,25 +694,19 @@ int main(int argc, char **argv) {
             chunkSize = (convSize / imgWidth);
             offset = haloSize;
         }
-
-        /*printf("[P%d] ITERSIZE: %ld\n", prank, iterSize / imgWidth);
-        printf("[P%d] CONVSIZE: %ld - %ld\n", prank, chunkSize, offset);*/
         
         // Duplicate the image chunk
-        gettimeofday(&tim, NULL);
-        start = tim.tv_sec + toSeconds(tim.tv_usec);
+        start = MPI_Wtime();
         if (duplicateImageChunk(source, output) == NULL) {
             perror("Error: ");
             return -1;
         }
-        gettimeofday(&tim, NULL);
-        tcopy = tcopy + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+        tcopy = tcopy + (MPI_Wtime() - start);
         
         //------------------------------------------------------------------//
         // - CHUNK CONVOLUTION ---------------------------------------------//
         //------------------------------------------------------------------//
-        gettimeofday(&tim, NULL);
-        start = tim.tv_sec + toSeconds(tim.tv_usec);
+        start = MPI_Wtime();
 
         convolve2D(source->R, output->R, imgWidth, chunkSize, 
         	offset, kern->vkern, kern->kernelX, kern->kernelY);
@@ -743,12 +715,11 @@ int main(int argc, char **argv) {
         convolve2D(source->B, output->B, imgWidth, chunkSize, 
         	offset, kern->vkern, kern->kernelX, kern->kernelY);
         
-        gettimeofday(&tim, NULL);
-        tconv = tconv + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+        tconv = MPI_Wtime() - start;
+
         //------------------------------------------------------------------//
         // - CHUNK SAVING --------------------------------------------------//
         //------------------------------------------------------------------//
-        gettimeofday(&tim, NULL);
 
         if(pc > 0) {
             offset = haloSize;
@@ -762,13 +733,11 @@ int main(int argc, char **argv) {
             chunkSize = (convSize / imgWidth) - haloSize;
         }
 
-        printf("[P%d] WCONVSIZE: %ld - %ld\n",prank, chunkSize, offset);
-
         writeSize = calculateWriteAmount(output, offset, chunkSize, 
             imgWidth);
 
-        MPI_Allgather(&writeSize, 1, MPI_LONG, writeOffs, 1, MPI_LONG,
-            MPI_COMM_WORLD);
+        MPI_Allgather((void*) &writeSize, 1, MPI_LONG, (void*) &writeOffs[0], 
+            1, MPI_LONG, MPI_COMM_WORLD);
 
         position = totalWritten;
 
@@ -779,15 +748,15 @@ int main(int argc, char **argv) {
             totalWritten = totalWritten + writeOffs[i];
         }
 
-        start = tim.tv_sec + toSeconds(tim.tv_usec);
+        start = MPI_Wtime();
+
         if (savingChunk(output, mfpdst, &position, (offset * imgWidth), 
-                        (chunkSize * imgWidth))) {
+                        (chunkSize * imgWidth), writeSize)) {
             perror("Error: ");
             return -1;
         }
 
-        gettimeofday(&tim, NULL);
-        tstore = tstore + (tim.tv_sec + toSeconds(tim.tv_usec) - start);
+        tstore = tstore + (MPI_Wtime() - start);
 
         // Moving previously discarded pixels to the beginning of the bucket
         // for the next iteration
@@ -803,50 +772,48 @@ int main(int argc, char **argv) {
         c++;
     }
 
-    fclose(fpsrc);
-    fclose(fpdst);
-
     MPI_File_close(mfpsrc);
     MPI_File_close(mfpdst);
     
-    gettimeofday(&tim, NULL);
-    tend = tim.tv_sec + toSeconds(tim.tv_usec);
+    tend = MPI_Wtime();
+
+    if(prank == 0) {
     
-    /*printf("-----------------------------------\n");
-    printf("|       TYPE SIZES (BYTES)        |\n");
-    printf("-----------------------------------\n");
-    printf("Size of short: ----> %ld\n", sizeof(short));
-    printf("Size of int: ------> %ld\n", sizeof(int));
-    printf("Size of long: -----> %ld\n", sizeof(long));
-    printf("Size of intmax_t: -> %ld\n", sizeof(intmax_t));
-    printf("Size of size_t: ---> %ld\n", sizeof(size_t));
-    printf("Size of float: ----> %ld\n", sizeof(float));
-    printf("Size of double: ---> %ld\n", sizeof(double));
-    printf("-----------------------------------\n");
-    printf("|          IMAGE INFO             |\n");
-    printf("-----------------------------------\n");
-    printf("Working directory: %s\n", cwd);
-    printf("File path: %s\n", sourceFile);
-    printf("File output: %s\n", outFile);
-    printf("Header size (bytes): %ld\n", source->headersize);
-    printf("Raster size (bytes): %jd\n", source->rastersize);
-    printf("ISizeX : %d\n", imgWidth);
-    printf("ISizeY : %d\n", imgHeight);
-    printf("kSizeX : %d\n", kern->kernelX);
-    printf("kSizeY : %d\n", kern->kernelY);
-    printf("-----------------------------------\n");
-    printf("|         EXECUTION TIMES         |\n");
-    printf("-----------------------------------\n");
-    printf("%.6lfs elapsed in reading image file.\n", tread);
-    printf("%.6lfs elapsed in copying image structure.\n", tcopy);
-    printf("%.6lfs elapsed in reading kernel matrix.\n", treadk);
-    printf("%.6lfs elapsed computing the convolution.\n", tconv);
-    printf("%.6lfs elapsed in writing the resulting image.\n", tstore);
-    printf("-----------------------------------\n");
-    printf("%.6lfs elapsed in total.\n", tend-tstart);
-    printf("-----------------------------------\n");*/
-    /*printf("%d %d %d %f\n", atoi(&sourceFile[strlen(sourceFile)-5]),
-        partitions, nThreads, tconv);*/
+        printf("-----------------------------------\n");
+        printf("|       TYPE SIZES (BYTES)        |\n");
+        printf("-----------------------------------\n");
+        printf("Size of short: ----> %ld\n", sizeof(short));
+        printf("Size of int: ------> %ld\n", sizeof(int));
+        printf("Size of long: -----> %ld\n", sizeof(long));
+        printf("Size of intmax_t: -> %ld\n", sizeof(intmax_t));
+        printf("Size of size_t: ---> %ld\n", sizeof(size_t));
+        printf("Size of float: ----> %ld\n", sizeof(float));
+        printf("Size of double: ---> %ld\n", sizeof(double));
+        printf("-----------------------------------\n");
+        printf("|          IMAGE INFO             |\n");
+        printf("-----------------------------------\n");
+        printf("Working directory: %s\n", cwd);
+        printf("File path: %s\n", sourceFile);
+        printf("File output: %s\n", outFile);
+        printf("Header size (bytes): %ld\n", source->headersize);
+        printf("Raster size (bytes): %jd\n", source->rastersize);
+        printf("ISizeX : %d\n", imgWidth);
+        printf("ISizeY : %d\n", imgHeight);
+        printf("kSizeX : %d\n", kern->kernelX);
+        printf("kSizeY : %d\n", kern->kernelY);
+        printf("-----------------------------------\n");
+        printf("|         EXECUTION TIMES         |\n");
+        printf("-----------------------------------\n");
+        printf("%.6lfs elapsed in reading image file.\n", tread);
+        printf("%.6lfs elapsed in copying image structure.\n", tcopy);
+        printf("%.6lfs elapsed in reading kernel matrix.\n", treadk);
+        printf("%.6lfs elapsed computing the convolution.\n", tconv);
+        printf("%.6lfs elapsed in writing the resulting image.\n", tstore);
+        printf("-----------------------------------\n");
+        printf("%.6lfs elapsed in total.\n", tend-tstart);
+        printf("-----------------------------------\n");
+        //printf("%s %s %d %.3lf\n", sourceFile, kernFile, pnum, tend-tstart);
+    }
 
     //----------------------------------------------------------------------//
     // - MEMORY CLEANING  --------------------------------------------------//
@@ -855,9 +822,12 @@ int main(int argc, char **argv) {
     freeImagestructure(&source);
     freeImagestructure(&output);
     freeDataBuckets(buckets, 1);
-    freeChunkList(chunkLst, partitions);
+    freeChunkList(chunkLst, effectivePart);
     free(kern->vkern);
     free(kern);
+    free(mfpsrc);
+    free(mfpdst);
+    free(writeOffs);
 
     //----------------------------------------------------------------------//
 

@@ -164,18 +164,16 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
     void* temp = NULL;
     MPI_Status status;
 
-    int dataRecvd = 0;
-
     if(prank == 0) {
         rasterOff = (int) (bsize % 3);
         rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
         transData = rasterOff + rowOff;
         buff = (int*) malloc(sizeof(int) * transData);
-        memcpy(&buff[0], &bucket->data[bsize-transData], transData * sizeof(int));
+        memcpy(&buff[0], &bucket->data[bsize-transData], 
+            transData * sizeof(int));
         bucket->bsize = (bsize - transData);
         MPI_Send((void*) &transData, 1 , MPI_INT, prank+1, 1, 
             MPI_COMM_WORLD);
-        //printf("[P%d] SEND - %d\n", prank, transData);
         MPI_Send((void*) buff, transData, MPI_INT, prank+1, 
             1, MPI_COMM_WORLD);
     } else {
@@ -184,12 +182,8 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
         buff = (int*) malloc(sizeof(int) * (transData));
         MPI_Recv(buff, transData, MPI_INT, prank-1, MPI_ANY_TAG, 
             MPI_COMM_WORLD, &status);
-        MPI_Get_count(&status, MPI_INT, &dataRecvd);
-        //printf("[P%d] RECV - %d\n", prank, dataRecvd);
         bsize += transData;
         if(bsize > bucket->blckSize) {
-            printf("[P%d] REALLOC NECESSARY 1 %ld - %ld\n",prank, 
-                bsize, bucket->blckSize);
             temp = realloc((void*) bucket->data, bsize * sizeof(int));
             if(temp != NULL) {
                 bucket->data = temp;
@@ -200,10 +194,12 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
             }
             bucket->blckSize = bsize;
         }
+
         memmove(&bucket->data[transData], &bucket->data[0], bucket->bsize * 
             sizeof(int));
         memcpy(&bucket->data[0], &buff[0], transData * sizeof(int));
         bucket->bsize = bsize;
+
         if(prank < pnum-1) {
             rasterOff = (int) (bsize % 3);
             rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
@@ -219,7 +215,6 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
             memcpy(&buff[0], &bucket->data[bsize-transData], 
                 transData * sizeof(int));
             bucket->bsize = (bsize - transData);
-            //printf("[P%d] SEND - %d\n", prank, transData);
             MPI_Send((void*) &transData, 1 , MPI_INT, prank+1, 1, 
                 MPI_COMM_WORLD);
             MPI_Send((void*) buff, transData, MPI_INT, prank+1, 
@@ -234,7 +229,7 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
 void transferBorders(int pc, int parts, int prank, int pnum, 
     DataBucket bucket, int imgWidth, int halosize) {
 
-    int transData = imgWidth * 3 * halosize, dataOffset;
+    int transData = imgWidth * 3 * halosize;
     int transBytes = transData * sizeof(int);
     int *upperBuff = NULL, *lowerBuff = NULL, *recvBuff = NULL;
     long bckSize = bucket->bsize;
@@ -267,7 +262,7 @@ void transferBorders(int pc, int parts, int prank, int pnum,
                 exchangeSections(upperBuff, recvBuff, bucket, transData, 
                     prank-1, TRUE);
 
-                bckSize += transData; // Adding previus row
+                bckSize += transData;
 
                 free(upperBuff);
             }
@@ -278,19 +273,21 @@ void transferBorders(int pc, int parts, int prank, int pnum,
             exchangeSections(upperBuff, recvBuff, bucket, transData, 
                 prank-1, TRUE);
 
-            bckSize += transData; // Adding previus row
+            bckSize += transData;
             bucket->bsize = bckSize + transData;
 
             free(upperBuff);
         }
 
     }
+
+    free(recvBuff);
 }
 
 void exchangeSections(int *lbuff, int *rbuff, DataBucket bucket, 
     int transData, int dst, int putUp) {
 
-    long nmsize = 0L, dataSize = 0L;
+    long dataSize = 0L;
     int transByes = (transData * sizeof(int));
     int *data = NULL;
     void **temp = NULL;
@@ -333,7 +330,6 @@ void adjustBucketContents(DataBucket *buckets, int prank, int pnum,
     int iwidth, int halosize) {
 
     long bsize = 0L;
-    int dataRecvd = 0;
     int transData = 0;
     int rasterOff, rowOff;
     int *buff = NULL;
@@ -345,7 +341,6 @@ void adjustBucketContents(DataBucket *buckets, int prank, int pnum,
         buff = (int*) malloc(sizeof(int) * transData);
         MPI_Recv(buff, transData, MPI_INT, pnum-1, MPI_ANY_TAG, 
             MPI_COMM_WORLD, &status);
-        MPI_Get_count(&status, MPI_INT, &dataRecvd);
         memcpy(&buckets[0]->data[0], &buff[0], transData * sizeof(int));
         buckets[0]->bsize = transData;
         buckets[0]->offset = transData - (halosize * iwidth * 3); //WHY?
@@ -368,6 +363,10 @@ void adjustBucketContents(DataBucket *buckets, int prank, int pnum,
         buckets[0]->offset = 0;
     }
 
+    if(buff != NULL) {
+        free(buff); 
+    }
+
 }
 
 void adjustProcessBucket(DataBucket *buckets, int iwidth, int halosize) {
@@ -382,8 +381,6 @@ void adjustProcessBucket(DataBucket *buckets, int iwidth, int halosize) {
     rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
 
     offsetData = rasterOff + rowOff + (halosize * 6 * iwidth);
-
-    printf("DATA TO MOVE: %d\n", offsetData);
 
     memmove(&buckets[0]->data[0], &buckets[0]->data[bsize-offsetData], 
         offsetData * sizeof(int));
