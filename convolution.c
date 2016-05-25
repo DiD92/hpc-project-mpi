@@ -48,7 +48,6 @@
 
 int validateParameters(char**);
 double calculateExtraSize(int partitions);
-double toSeconds(suseconds_t);
 long rebuildImage(ImageData, DataBucket*);
 long calcRasterWriteAmount(int*, long, long);
 long calculateWriteAmount(ImageData, int, int, int);
@@ -225,8 +224,8 @@ int savingChunk(ImageData img, MPI_File *mfp, long *offset, long dataOffst,
         k += sprintf(&obuff[k], "%d\n", img->B[i]);
     }
 
-    MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, 
-            "native", MPI_INFO_NULL);
+    MPI_File_set_view(*mfp, *offset, MPI_CHAR, MPI_CHAR, "native", 
+        MPI_INFO_NULL);
 
     // Writing image partition
     MPI_File_write(*mfp, (void*) &obuff[0], writeAmount, MPI_CHAR, &status);
@@ -362,10 +361,6 @@ double calculateExtraSize(int partitions) {
     return (x / (15 + 3*x)) - 0.058f;
 }
 
-double toSeconds(suseconds_t micros) {
-    return (micros / F_MICROS_IN_SECOND);
-}
-
 // Method used to fill the ImageData structure using the data found in the
 // DataBucket list.
 long rebuildImage(ImageData img, DataBucket *bucks) {
@@ -373,12 +368,13 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
     long rasterR, rasterG, rasterB;
     long increaseR, increaseG, increaseB;
     long memR, memG, memB;
-    int flip, **temp;
+    int flip, **temp = NULL;
 
     r = g = b = 0L;
     flip = 0;
-    increaseR = increaseG = increaseB = INCREASE_FACTOR;
+    increaseR = increaseG = increaseB = INCREASE_FACTOR * 10;
     memR = memG = memB = 0L;
+    
     temp = (int**) malloc(sizeof(int*)); // Avoid breaking strict aliasing
 
     for(int i = 0; i < 1; i++) {
@@ -390,7 +386,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterR = img->blckSize;
                     *temp = img->R;
                     memR = checkForRealloc((void**) temp, img->blckSize, 
-                        (r + REALLOC_MARGIN), sizeof(int), increaseR);
+                        r + REALLOC_MARGIN, sizeof(int), increaseR);
                     img->R = *temp;
                     if(rasterR < memR) {
                         increaseR *= 2;
@@ -402,7 +398,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterG = img->blckSize;
                     *temp = img->G;
                     memG = checkForRealloc((void**) temp, img->blckSize, 
-                        (g + REALLOC_MARGIN), sizeof(int), increaseG);
+                        g + REALLOC_MARGIN, sizeof(int), increaseG);
                     img->G = *temp;
                     if(rasterG < memG) {
                         increaseG *= 2;
@@ -414,7 +410,7 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     rasterB = img->blckSize;
                     *temp = img->B;
                     memB = checkForRealloc((void**) temp, img->blckSize, 
-                        (b + REALLOC_MARGIN), sizeof(int), increaseB);
+                        b + REALLOC_MARGIN, sizeof(int), increaseB);
                     img->B = *temp;
                     if(rasterB < memB) {
                         increaseB *= 2;
@@ -422,10 +418,13 @@ long rebuildImage(ImageData img, DataBucket *bucks) {
                     }
                     break;
             }
+            *temp = NULL;
             flip = (flip + 1) % 3;
         }
         bucks[i]->offset = 0;
     }
+
+    *temp = NULL;
 
     free(temp);
 
@@ -672,10 +671,9 @@ int main(int argc, char **argv) {
                 imgWidth, haloSize);
         }
 
-
         // Copying data from the DataBucket into the ImageData arrays
+        //if(gPrank == 0 && c < 1)
         iterSize = rebuildImage(source, buckets);
-
 
         // Discarding incomplete row.
         convOffset = (iterSize % imgWidth);

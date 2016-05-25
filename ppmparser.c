@@ -33,7 +33,7 @@
 // -- AUXILIARY METHODS ----------------------------------------------------//
 //--------------------------------------------------------------------------//
 
-void exchangeSections(int*, int*, DataBucket, int, int, int);
+void exchangeSections(DataBucket, int, int, int);
 
 //--------------------------------------------------------------------------//
 // -- LIBRARY IMPLEMENTATION ---------------------------------------------- //
@@ -53,7 +53,7 @@ long checkForRealloc(void **ptr, long allcBlcks, long actBlcks, size_t bSize,
         } else {
             *ptr = temp;
         }
-    }
+    }    
 
     return newAlloc;
 }
@@ -159,15 +159,14 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
 
     int transData = 0L;
     long bsize = bucket->bsize;
-    int rasterOff, rowOff;
     int *buff = NULL;
-    void* temp = NULL;
+    void **temp = NULL;
     MPI_Status status;
 
+    temp = (void**) malloc(sizeof(int*));
+
     if(prank == 0) {
-        rasterOff = (int) (bsize % 3);
-        rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
-        transData = rasterOff + rowOff;
+        transData = calcOffset(bsize, iwidth);
         buff = (int*) malloc(sizeof(int) * transData);
         memcpy(&buff[0], &bucket->data[bsize-transData], 
             transData * sizeof(int));
@@ -179,42 +178,35 @@ void transferUnalignedRasters(int prank, int pnum, DataBucket bucket,
     } else {
         MPI_Recv(&transData, 1, MPI_INT, prank-1, MPI_ANY_TAG, 
             MPI_COMM_WORLD, &status);
-        buff = (int*) malloc(sizeof(int) * (transData));
+        buff = (int*) malloc(sizeof(int) * transData);
         MPI_Recv(buff, transData, MPI_INT, prank-1, MPI_ANY_TAG, 
             MPI_COMM_WORLD, &status);
         bsize += transData;
-        if(bsize > bucket->blckSize) {
-            temp = realloc((void*) bucket->data, bsize * sizeof(int));
-            if(temp != NULL) {
-                bucket->data = temp;
-            } else {
-                free(bucket->data);
-                perror("Error realloc");
-                exit(-1);
-            }
-            bucket->blckSize = bsize;
-        }
 
-        memmove(&bucket->data[transData], &bucket->data[0], bucket->bsize * 
-            sizeof(int));
+        *temp = bucket->data;
+        bucket->blckSize = checkForRealloc(temp, bucket->blckSize, bsize,
+            sizeof(int), transData);
+        bucket->data = *temp;
+
+        *temp = NULL;
+
+        memmove(&bucket->data[transData], &bucket->data[0], 
+            bucket->bsize * sizeof(int));
         memcpy(&bucket->data[0], &buff[0], transData * sizeof(int));
         bucket->bsize = bsize;
 
+        free(buff);
+
+        buff = NULL;
+
         if(prank < pnum-1) {
-            rasterOff = (int) (bsize % 3);
-            rowOff = (int) ((bsize - rasterOff) % (iwidth * 3));
-            transData = rasterOff + rowOff;
-            temp = (int*) realloc((void*) buff, sizeof(int) * transData);
-            if(temp != NULL) {
-                buff = temp;
-            } else {
-                free(buff);
-                perror("Error realloc");
-                exit(-1);
-            }
+            transData = calcOffset(bsize, iwidth);
+
+            buff = (int*) malloc(sizeof(int) * transData);
+
             memcpy(&buff[0], &bucket->data[bsize-transData], 
                 transData * sizeof(int));
-            bucket->bsize = (bsize - transData);
+            bucket->bsize -= transData;
             MPI_Send((void*) &transData, 1 , MPI_INT, prank+1, 1, 
                 MPI_COMM_WORLD);
             MPI_Send((void*) buff, transData, MPI_INT, prank+1, 
@@ -230,100 +222,93 @@ void transferBorders(int pc, int parts, int prank, int pnum,
     DataBucket bucket, int imgWidth, int halosize) {
 
     int transData = imgWidth * 3 * halosize;
-    int transBytes = transData * sizeof(int);
-    int *upperBuff = NULL, *lowerBuff = NULL, *recvBuff = NULL;
-    long bckSize = bucket->bsize;
 
-    recvBuff = (int*) malloc(transBytes);
+    void **temp = NULL;
 
     if(pc == 0) { // First partition
-        lowerBuff = (int*) malloc(transBytes);
-        exchangeSections(lowerBuff, recvBuff, bucket, transData, 
-            prank+1, FALSE);
-
-        free(lowerBuff);
+        exchangeSections(bucket, transData, prank+1, FALSE);
 
     } else if(pc == (parts * pnum) - 1) { // Last partition
-        upperBuff = (int*) malloc(transBytes);
-
-        exchangeSections(upperBuff, recvBuff, bucket, transData, 
-            prank-1, TRUE);
-
-        free(upperBuff);
+        exchangeSections(bucket, transData, prank-1, TRUE);
 
     } else { // Rest
         if(prank < pnum-1) {
-            lowerBuff = (int*) malloc(transBytes);
-            exchangeSections(lowerBuff, recvBuff, bucket, transData, 
-                prank+1, FALSE);
+            exchangeSections(bucket, transData, prank+1, FALSE);
+
             if(prank > 0) {
-                upperBuff = (int*) malloc(transBytes);
+                exchangeSections(bucket, transData, prank-1, TRUE);
 
-                exchangeSections(upperBuff, recvBuff, bucket, transData, 
-                    prank-1, TRUE);
-
-                bckSize += transData;
-
-                free(upperBuff);
             }
-            free(lowerBuff);
         } else {
-            upperBuff = (int*) malloc(transBytes);
+            exchangeSections(bucket, transData,  prank-1, TRUE);
 
-            exchangeSections(upperBuff, recvBuff, bucket, transData, 
-                prank-1, TRUE);
+            bucket->bsize += transData;
 
-            bckSize += transData;
-            bucket->bsize = bckSize + transData;
+            temp = (void**) malloc(sizeof(int*));
+            
+            *temp = bucket->data;
+            bucket->blckSize = checkForRealloc(temp, bucket->blckSize, 
+                bucket->bsize, sizeof(int), bucket->bsize-bucket->blckSize);
+            bucket->data = *temp;
 
-            free(upperBuff);
+            *temp = NULL;
+
+            free(temp);
         }
 
     }
-
-    free(recvBuff);
 }
 
-void exchangeSections(int *lbuff, int *rbuff, DataBucket bucket, 
-    int transData, int dst, int putUp) {
+void exchangeSections(DataBucket bucket, int transData, int dst, int putUp) {
 
     long dataSize = 0L;
-    int transByes = (transData * sizeof(int));
-    int *data = NULL;
+    int transBytes = (transData * sizeof(int));
+    int *trBuff = NULL, *rcvBuff = NULL;
     void **temp = NULL;
 
     MPI_Request request;
     MPI_Status status;
 
-    data = bucket->data;
     dataSize = bucket->bsize;
 
     temp = (void**) malloc(sizeof(int*));
+    trBuff = (int*) malloc(transBytes);
+    rcvBuff = (int*) malloc(transBytes);
 
-    memcpy(&lbuff[0], &data[dataSize - transData], transByes);
-
-    MPI_Isend((void*) lbuff, transData, MPI_INT, dst, 1, MPI_COMM_WORLD, 
-        &request);
-
-    MPI_Recv((void*) rbuff, transData, MPI_INT, dst, MPI_ANY_TAG, 
-        MPI_COMM_WORLD, &status);
-
-    *temp = data;
-    bucket->blckSize = checkForRealloc(temp, bucket->blckSize, 
-        (dataSize + transData), sizeof(int), transData);
-    data = *temp;
-
-    if(putUp == TRUE) {
-        memmove(&data[transData], &data[0], bucket->bsize * sizeof(int));
-        memcpy(&data[0], &rbuff[0], transByes);
-    } else {
-        memcpy(&data[dataSize], &rbuff[0], transByes);
+    if(temp == NULL || trBuff == NULL || rcvBuff == NULL) {
+        MPI_Abort(MPI_COMM_WORLD, -1);
     }
 
-    bucket->bsize = dataSize + transData;
+    memcpy(&trBuff[0], &bucket->data[dataSize - transData], transBytes);
+
+    MPI_Isend((void*) trBuff, transData, MPI_INT, dst, 1, MPI_COMM_WORLD, 
+        &request);
+
+    MPI_Recv((void*) &rcvBuff[0], transData, MPI_INT, dst, MPI_ANY_TAG, 
+        MPI_COMM_WORLD, &status);
+
+    *temp = bucket->data;
+    bucket->blckSize = checkForRealloc(temp, bucket->blckSize, 
+        (dataSize + transData), sizeof(int), transData);
+    bucket->data = *temp;
 
     *temp = NULL;
+
+    if(putUp == TRUE) {
+        memmove(&bucket->data[transData], &bucket->data[0], 
+            bucket->bsize * sizeof(int));
+        memcpy(&bucket->data[0], &rcvBuff[0], transBytes);
+    } else {
+        memcpy(&bucket->data[dataSize], &rcvBuff[0], transBytes);
+    }
+
+    bucket->bsize = dataSize + transData;    
+
+    MPI_Wait(&request, &status);
+
     free(temp);
+    free(rcvBuff);
+    free(trBuff);
 }
 
 void adjustBucketContents(DataBucket *buckets, int prank, int pnum, 
@@ -388,8 +373,6 @@ void adjustProcessBucket(DataBucket *buckets, int iwidth, int halosize) {
     buckets[0]->offset = offsetData;
     buckets[0]->bsize = offsetData;
 }
-
-
 
 intmax_t getAdjustedPoint(FILE** f, intmax_t next) {
     fseek(*f, next, SEEK_SET);
@@ -495,4 +478,3 @@ ImageData duplicateImageData(ImageData src, int partitions, int halo,
 }
 
 //--------------------------------------------------------------------------//
-
